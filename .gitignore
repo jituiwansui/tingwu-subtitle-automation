@@ -18,3 +18,5 @@ build/
 dist/
 *.spec
 TingwuSubtitle.exe
+nuitka_build/
+TingwuSubtitleNuitka.exe
