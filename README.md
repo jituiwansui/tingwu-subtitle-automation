@@ -20,6 +20,7 @@
 - 使用 `TingwuSubtitle.exe` 时不需要安装 Python
 - 使用源码时需要 Python 3.10 或更高版本和 `requests` 2.x
 - 可选：`ffprobe`。安装后程序会把媒体时长一并回传；没有它也能运行。
+- 可选：Python 包 `py-mini-racer`（`pip install py-mini-racer`，已写入 `requirements.txt`）。安装后，当默认的降级值登录被阿里云风控拒绝时，程序会自动运行官方风控 SDK 生成真实令牌重试；不安装也能正常运行。
 
 只运行 EXE 可跳过此步骤。使用 Python 源码时安装依赖：
 
@@ -33,7 +34,8 @@ python -m pip install -r .\requirements.txt
 TingwuSubtitle.exe  # Windows x64 原生启动器
 runtime/            # 预展开运行环境，不能删除、移动或改名
 config.json         # 明文账号、密码
-auth.json           # 明文 Cookie、阿里云登录风控材料
+auth.json           # 明文 Cookie 登录状态（登录成功后程序自动写入）
+sdk/                # 官方风控 SDK 缓存（运行时自动下载，可删除）
 ```
 
 程序运行时自动读取这两个文件，不依赖当前工作目录，也不需要另传账号参数。按照本项目的部署要求，两者均不加密；复制整个目录即可同时复制登录能力。
@@ -143,7 +145,13 @@ Remove-Item Env:TINGWU_PASSWORD
 
 账号也可通过 `--username` 临时覆盖。环境变量和命令行账号仅影响本次运行；登录刷新后，新的 Cookie 会原子写回根目录 `auth.json`。
 
-阿里云账号密码登录还要求网页动态生成的风控材料。当前根目录 `auth.json` 已包含这些材料；如果风控材料失效，程序会明确报错。业务处理流程和正常的会话刷新都不会启动或控制浏览器。
+阿里云账号密码登录所需的风控字段（`bx-ua`、`bx-umidtoken`）按以下策略自动处理：
+
+1. 默认使用官方风控 SDK 自身的降级值 `not_loaded` 直接登录（服务端接受该值，速度最快，无任何额外依赖）；
+2. 如果登录被风控拒绝，程序自动改用内嵌 V8 引擎（`py-mini-racer`）运行阿里云官方风控 SDK（awsc/fireyejs，运行时从阿里云 CDN 下载并缓存到 `sdk/`，版本变化自动跟进），在本地生成真实令牌后重试；成功后会记住该模式，后续登录直接走官方生成；
+3. 全程不启动、不控制浏览器，不需要 Node.js 等任何额外软件，也不必预先在 `auth.json` 准备任何材料；环境变量 `TINGWU_BX_UA` / `TINGWU_BX_UMIDTOKEN` 仍可显式覆盖令牌。
+
+如果两种方式都失败（例如阿里云主动触发额外风控：新设备、异地登录、滑块验证），程序会明确报错，按提示在浏览器手动登录一次该账号后重试即可。
 
 如果移动或重命名配置文件，可在子命令前指定：
 
@@ -153,7 +161,7 @@ python -X utf8 .\tingwu_subtitle.py --config-file "D:\safe\config.json" --auth-f
 
 ## 安全与失败处理
 
-- 账号密码保存在根目录明文 `config.json`；Cookie 和风控材料保存在根目录明文 `auth.json`。
+- 账号密码保存在根目录明文 `config.json`；Cookie 登录状态保存在根目录明文 `auth.json`。
 - 程序不会把密码、Cookie、风控字段、OSS 上传签名或字幕下载签名打印到日志。
 - `.gitignore` 已忽略 `config.json` 和 `auth.json`，但这不能阻止手动复制、压缩或误传文件；请把整个目录和 ZIP 都按账号凭证管理。
 - OSS 上传地址、字幕下载地址都是短期签名 URL，程序不会打印或保存这些地址。

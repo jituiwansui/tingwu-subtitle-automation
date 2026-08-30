@@ -1,0 +1,4 @@
+requests>=2.28
+# 可选：内嵌 V8 引擎，用于本地运行官方风控 SDK 生成 bx-ua / bx-umidtoken。
+# 不装也能运行（自动使用官方降级值 not_loaded）。
+py-mini-racer>=0.6.0
