@@ -1,178 +1,188 @@
 # 通义听悟字幕自动化工具
 
-这个工具直接调用通义听悟网页实际使用的 HTTP 接口，完成以下闭环：
+上传本地音视频到通义听悟，自动转写、下载 SRT 字幕，成功后永久删除远端记录。全程不启动、不控制浏览器。
+
+对每个文件依次完成以下闭环：
 
 1. 创建转写任务；
-2. 将本地音视频 PUT 到听悟签发的阿里云 OSS 地址；
+2. 将本地文件 PUT 到听悟签发的阿里云 OSS 地址；
 3. 通知听悟开始处理并轮询转写状态；
 4. 创建 SRT 导出任务并轮询下载地址；
-5. 下载到同目录的 `.part` 临时文件；
-6. 校验 HTTP、文件非空、UTF-8 编码和 SRT 时间轴结构；
-7. 原子重命名为最终 `.srt`；
-8. 只有以上步骤全部成功，才永久删除听悟中的对应记录；
-9. 再查一次任务列表，确认记录确实已删除。
-
-上传、轮询、导出、下载和删除全程不启动、不控制浏览器。
+5. 下载到同目录的 `.part` 临时文件，校验 HTTP、非空、UTF-8 编码和 SRT 时间轴结构；
+6. 原子重命名为最终 `.srt`；
+7. 只有以上全部成功，才永久删除听悟中的对应记录，并再查一次任务列表确认删除。
 
 ## 运行环境
 
 - Windows 10/11 x64
-- 使用 `TingwuSubtitle.exe` 时不需要安装 Python 或任何其他软件（风控令牌官方生成所需的 V8 引擎也已打包在内）
-- 使用源码时需要 Python 3.10 或更高版本和 `requests` 2.x
-- 可选：`ffprobe`。安装后程序会把媒体时长一并回传；没有它也能运行。
-- 可选（仅源码运行需要）：Python 包 `py-mini-racer`（`pip install py-mini-racer`，已写入 `requirements.txt`）。安装后，当默认的降级值登录被阿里云风控拒绝时，程序会自动运行官方风控 SDK 生成真实令牌重试；不安装也能正常运行。
-
-只运行 EXE 可跳过此步骤。使用 Python 源码时安装依赖：
+- 使用编译好的 EXE 时**不需要安装 Python 或任何其他软件**（内嵌 V8 引擎等依赖已全部打包）
+- 使用源码时需要 Python 3.10+，并安装 `requirements.txt` 中的依赖：
 
 ```powershell
 python -m pip install -r .\requirements.txt
 ```
 
-程序所需的账号和登录材料全部放在程序根目录：
+可选组件（没有也能运行）：
+
+- `ffprobe`：安装后程序会把媒体时长一并回传。
+- Python 包 `py-mini-racer`（已写入 `requirements.txt`，仅源码运行需要手动安装）：当默认的降级值登录被阿里云风控拒绝时，程序会用它运行官方风控 SDK 生成真实令牌重试。
+
+## 文件结构
 
 ```text
-TingwuSubtitle.exe  # Windows x64 单文件程序
-config.json         # 明文账号、密码
-auth.json           # 明文 Cookie 登录状态（登录成功后程序自动写入）
-sdk/                # 官方风控 SDK 缓存（运行时自动下载，可删除）
+TingwuSubtitle.exe        # PyInstaller 编译的单文件程序（内嵌 Python 字节码）
+TingwuSubtitleNuitka.exe  # Nuitka 编译的单文件程序（原生机器码，体积更小）
+tingwu_subtitle.py        # 源码
+config.json               # 明文账号、密码
+auth.json                 # 明文 Cookie 登录状态（登录成功后程序自动写入）
+sdk/                      # 官方风控 SDK 缓存（需要时自动下载，可删除）
+requirements.txt          # 源码运行的 pip 依赖
 ```
 
-程序运行时自动读取这两个文件，不依赖当前工作目录，也不需要另传账号参数。按照本项目的部署要求，两者均不加密；复制整个目录即可同时复制登录能力。
+两个 EXE 功能完全相同，任选其一。程序始终把 `config.json`、`auth.json`、`sdk/` 放在 EXE（或源码）所在目录读写，不依赖当前工作目录。分发时复制整个目录即可，最小集合是 EXE + `config.json`；`auth.json` 和 `sdk/` 不存在时会自动登录、自动下载。
 
-根目录提供两种编译方式产出的单文件 64 位程序，功能完全相同，任选其一即可：
-
-- `TingwuSubtitle.exe`：PyInstaller 编译（内嵌 Python 字节码）；
-- `TingwuSubtitleNuitka.exe`：Nuitka 编译（原生机器码，体积更小，反编译难度更高；目标系统需自带常见的 VC++ 运行库，Windows 10/11 一般都有）。
-
-它们都是把 Python 运行时、依赖库和内嵌 V8 引擎（py-mini-racer，用于官方风控令牌生成）打包在内的单文件程序：Python 运行时、依赖库和内嵌 V8 引擎（py-mini-racer，用于官方风控令牌生成），目标电脑无需安装任何软件。程序始终把 `config.json`、`auth.json` 和 `sdk/` 缓存放在 EXE 所在目录读写，分发时把整个目录（至少 EXE + `config.json`）一起复制即可；`auth.json` 和 `sdk/` 不存在时会自动登录生成、自动下载。目标系统应为 Windows 10/11 x64。程序未做商业代码签名，其他电脑上的 SmartScreen 或杀毒软件可能要求用户确认允许运行。
+程序未做商业代码签名，其他电脑上的 SmartScreen 或杀毒软件可能要求用户确认允许运行。Nuitka 版在极个别干净系统上可能提示缺 `vcruntime140.dll`，安装微软官方 VC++ 运行库即可。
 
 > **重要安全提示：** `config.json` 和 `auth.json` 都是明文敏感文件。任何能读取本目录或压缩包的人，都可能取得账号密码或复用登录会话。请仅保存在可信电脑，不要上传网盘、Git 仓库、聊天群或交给无关人员；账号停用、泄露或交付他人后，应立即修改密码并退出所有会话。
 
-## 最快用法：拖放运行
+## 快速开始
 
-本工具不再包含 BAT 入口。直接使用根目录 `TingwuSubtitle.exe`。也可运行源码 `tingwu_subtitle.py`。
+方式一：把一个或多个音视频文件**拖到 EXE（或 `tingwu_subtitle.py`）图标上**，程序随即开始上传处理。
 
-方式一：把一个或多个音视频文件直接拖到 `TingwuSubtitle.exe` 图标上；使用源码时也可以拖到 `tingwu_subtitle.py` 图标上。程序随即开始上传和处理。
+方式二：**双击** EXE 或源码，在打开的控制台窗口里把文件拖进去，按 Enter 开始；结束后按 Enter 关闭窗口。
 
-方式二：直接双击 `TingwuSubtitle.exe` 或 `tingwu_subtitle.py`。打开控制台后，把一个或多个音视频文件拖入黑色控制台窗口，再按 Enter 开始。处理结束后按 Enter 关闭窗口。
-
-以上两种方式都不需要填写字幕目录。默认在每个源视频所在目录生成同名 `.srt`：
+默认在每个源文件所在目录生成同名 `.srt`：
 
 ```text
-D:\课程\第01讲.mp4
-D:\课程\第01讲.srt
+D:\课程\第01讲.mp4  →  D:\课程\第01讲.srt
 ```
 
-如果电脑双击 `.py` 时不是由 Python 打开，请先安装 Python，并让 `.py` 文件关联到 Python；也可以在本目录打开 PowerShell 运行：
+命令行方式（AI Agent、脚本调用也用这套语法）：
 
 ```powershell
+# 处理一个文件（首选简写：第一个参数是文件路径即可）
+.\TingwuSubtitle.exe "D:\视频\课程.mp4"
+
+# 处理多个文件，各自输出到自己的源文件目录
+.\TingwuSubtitle.exe "D:\视频\01.mp4" "E:\课程\02.mkv"
+
+# 等价完整形式
+.\TingwuSubtitle.exe process "D:\视频\课程.mp4"
+
+# 源码方式
 python -X utf8 .\tingwu_subtitle.py "D:\视频\课程.mp4"
-```
-
-批量处理多个文件时按顺序执行；每个文件分别输出到自己的源文件目录，并独立遵守“字幕成功后才删除”的规则：
-
-```powershell
-python -X utf8 .\tingwu_subtitle.py "D:\视频\01.mp4" "E:\课程\02.mp4"
 ```
 
 默认行为：
 
-- 语言：中文；
-- 不区分发言人；
-- 导出的 SRT 保留发言人和时间戳字段；
-- 字幕默认输出到对应音视频文件的同一目录；
-- 字幕验证成功后永久删除远端记录（不是只移到回收站）；
-- 输入视频始终保留，不会被程序删除或修改。
-- 控制台始终只显示一条连续的总进度条；上传、转写、导出、下载、校验和删除状态都在同一条进度上更新。
+- 语言中文、暂不区分发言人；
+- SRT 保留发言人和时间戳字段；
+- 字幕输出到源文件同目录；
+- 字幕校验成功后永久删除远端记录（不是移回收站）；
+- 输入文件永远不会被程序删除或修改；
+- 控制台只显示一条连续总进度条，上传、转写、导出、下载、校验、删除都在其上更新。
 
-## 常用参数
+## 命令行参数
+
+```text
+TingwuSubtitle.exe [全局参数] <命令> [命令参数]
+TingwuSubtitle.exe [FILE ...] [process 参数]          # 简写，最常用
+TingwuSubtitle.exe process FILE [FILE ...] [参数]     # 完整形式
+```
+
+### process 参数
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `FILE ...` | 必填 | 一个或多个本地音视频文件；含空格的路径必须加引号 |
+| `-o DIR` / `--output-dir DIR` | 源文件目录 | 把所有 SRT 统一输出到指定目录 |
+| `--lang cn` | `cn` | 中文普通话 |
+| `--lang en` | — | 英语 |
+| `--lang ja` | — | 日语 |
+| `--lang yue` | — | 粤语 |
+| `--role-split-num -1` | `-1` | 暂不区分发言人 |
+| `--role-split-num 1` | — | 单人演讲 |
+| `--role-split-num 2` | — | 两人对话 |
+| `--role-split-num 0` | — | 多人讨论 |
+| `--transcribe-timeout SEC` | `7200` | 最长转写等待秒数 |
+| `--export-timeout SEC` | `300` | 最长字幕导出等待秒数 |
+| `--poll-interval SEC` | `3.0` | 转写状态查询间隔 |
+| `--no-speaker` | 关闭 | 导出内容不附带发言人字段 |
+| `--no-timestamp` | 关闭 | 导出内容不附带时间戳字段 |
+| `--username USER` | `config.json` | 临时覆盖阿里云账号，通常不要传 |
+| `--password-env NAME` | `TINGWU_PASSWORD` | 指定读取密码的环境变量名，环境变量优先于 `config.json` |
+| `--keep-remote` | 关闭 | 调试用：字幕成功后保留远端记录 |
+
+示例：
 
 ```powershell
 # 英语音频
-python -X utf8 .\tingwu_subtitle.py "D:\audio\meeting.mp3" --lang en
+.\TingwuSubtitle.exe "D:\audio\meeting.mp3" --lang en
 
-# 2 人对话
-python -X utf8 .\tingwu_subtitle.py "D:\audio\interview.mp3" --role-split-num 2
+# 两人对话
+.\TingwuSubtitle.exe "D:\audio\interview.mp3" --role-split-num 2
 
-# 调试：字幕成功后暂时保留网页记录
-python -X utf8 .\tingwu_subtitle.py "D:\video\test.mp4" --keep-remote
+# 字幕统一输出到指定目录
+.\TingwuSubtitle.exe "D:\视频\01.mp4" "D:\视频\02.mp4" -o "D:\统一字幕"
 
-# 导出内容中不带发言人字段
-python -X utf8 .\tingwu_subtitle.py "D:\video\test.mp4" --no-speaker
+# 长视频：最长等待四小时
+.\TingwuSubtitle.exe "D:\视频\长课.mp4" --transcribe-timeout 14400
 
-# 自定义最长转写等待时间（秒）
-python -X utf8 .\tingwu_subtitle.py "D:\video\long.mp4" --transcribe-timeout 14400
-
-# 可选：把字幕集中输出到指定目录
-python -X utf8 .\tingwu_subtitle.py "D:\video\test.mp4" -o "D:\统一字幕"
+# 调试：保留网页端记录
+.\TingwuSubtitle.exe "D:\video\test.mp4" --keep-remote
 ```
 
-语言参数：
-
-| 参数 | 语言 |
-|---|---|
-| `cn` | 中文 |
-| `en` | 英语 |
-| `ja` | 日语 |
-| `yue` | 粤语 |
-
-发言人数参数：
-
-| 参数 | 含义 |
-|---|---|
-| `-1` | 暂不区分，默认 |
-| `1` | 单人演讲 |
-| `2` | 2 人对话 |
-| `0` | 多人讨论 |
-
-## 登录状态
-
-检查根目录 `auth.json` 中的会话是否有效：
+### 登录子命令
 
 ```powershell
-python -X utf8 .\tingwu_subtitle.py auth-status
+# 检查 auth.json 中的会话是否有效（无效返回退出码 1）
+.\TingwuSubtitle.exe auth-status
+
+# 用 config.json 的账号密码刷新会话
+.\TingwuSubtitle.exe auth-login
 ```
 
-如会话失效，直接刷新即可。程序会自动读取 `config.json` 中的账号和密码：
+### 全局参数（必须放在子命令之前）
 
 ```powershell
-python -X utf8 .\tingwu_subtitle.py auth-login
+.\TingwuSubtitle.exe --config-file "D:\safe\config.json" --auth-file "D:\safe\auth.json" process "D:\视频\课程.mp4"
 ```
 
-如需临时覆盖 `config.json` 中的密码，仍可使用环境变量：
+| 参数 | 说明 |
+|---|---|
+| `--config-file PATH` | 覆盖默认明文账号密码文件路径 |
+| `--auth-file PATH` | 覆盖默认明文 Cookie 登录文件路径 |
+
+使用自定义全局参数时必须显式写出 `process`，不要使用文件路径简写。
+
+## 登录与风控令牌机制
+
+- 账号密码读自根目录 `config.json`；也可用环境变量临时覆盖密码（不影响本次以外的运行）：
 
 ```powershell
 $env:TINGWU_PASSWORD = Read-Host "阿里云密码" -MaskInput
-python -X utf8 .\tingwu_subtitle.py auth-login
+.\TingwuSubtitle.exe auth-login
 Remove-Item Env:TINGWU_PASSWORD
 ```
 
-账号也可通过 `--username` 临时覆盖。环境变量和命令行账号仅影响本次运行；登录刷新后，新的 Cookie 会原子写回根目录 `auth.json`。
-
-阿里云账号密码登录所需的风控字段（`bx-ua`、`bx-umidtoken`）按以下策略自动处理：
-
-1. 默认使用官方风控 SDK 自身的降级值 `not_loaded` 直接登录（服务端接受该值，速度最快，无任何额外依赖）；
-2. 如果登录被风控拒绝，程序自动改用内嵌 V8 引擎（`py-mini-racer`）运行阿里云官方风控 SDK（awsc/fireyejs，运行时从阿里云 CDN 下载并缓存到 `sdk/`，版本变化自动跟进），在本地生成真实令牌后重试；成功后会记住该模式，后续登录直接走官方生成；
-3. 全程不启动、不控制浏览器，不需要 Node.js 等任何额外软件，也不必预先在 `auth.json` 准备任何材料；环境变量 `TINGWU_BX_UA` / `TINGWU_BX_UMIDTOKEN` 仍可显式覆盖令牌。
-
-如果两种方式都失败（例如阿里云主动触发额外风控：新设备、异地登录、滑块验证），程序会明确报错，按提示在浏览器手动登录一次该账号后重试即可。
-
-如果移动或重命名配置文件，可在子命令前指定：
-
-```powershell
-python -X utf8 .\tingwu_subtitle.py --config-file "D:\safe\config.json" --auth-file "D:\safe\auth.json" process "D:\视频\课程.mp4"
-```
+- 登录刷新后，新的 Cookie 会原子写回 `auth.json`，并自动收紧为仅当前 Windows 用户可读。
+- 阿里云登录的风控字段 `bx-ua` / `bx-umidtoken` 由程序自动处理，无需手工准备：
+  1. 默认使用官方风控 SDK 自身的降级值 `not_loaded` 直接登录（服务端接受，速度最快）；
+  2. 若登录被风控拒绝，自动改用内嵌 V8 引擎运行阿里云官方风控 SDK（awsc/fireyejs，运行时从阿里云 CDN 下载缓存到 `sdk/`，版本变化自动跟进）在本地生成真实令牌后重试；成功后记住该模式，后续登录直接走官方生成；
+  3. 若官方生成也失败（例如官方更新了加密方式），程序会自动回退并明确报错。
+- 环境变量 `TINGWU_BX_UA` / `TINGWU_BX_UMIDTOKEN` 可显式覆盖令牌（一般不需要）。
+- 排查令牌生成问题可设 `TINGWU_DEBUG_BX=1` 打印内部异常。
+- 只有当阿里云主动触发额外风控（新设备、异地登录等）时登录才可能失败；此时按提示在浏览器手动登录一次该账号再重试。
 
 ## 安全与失败处理
 
-- 账号密码保存在根目录明文 `config.json`；Cookie 登录状态保存在根目录明文 `auth.json`。
 - 程序不会把密码、Cookie、风控字段、OSS 上传签名或字幕下载签名打印到日志。
-- `.gitignore` 已忽略 `config.json` 和 `auth.json`，但这不能阻止手动复制、压缩或误传文件；请把整个目录和 ZIP 都按账号凭证管理。
-- OSS 上传地址、字幕下载地址都是短期签名 URL，程序不会打印或保存这些地址。
-- 在上传、转写、导出、下载、SRT 校验中的任何一步失败，程序都不会删除远端记录，并会打印 `transId` 便于手动处理。
-- 本地最终字幕已经成功写入，但远端删除失败时，字幕仍会保留，程序返回非零退出码并报告错误。
-- 默认永久删除是不可恢复操作，但只针对本次程序刚创建、且已经成功下载字幕的 `transId`。
-- 当前上传实现使用 OSS 单次 PUT，单个文件上限为 5 GiB。听悟网页虽然允许部分视频达到 6 GB，但超过 5 GiB 的文件需要另行实现 OSS 分片上传；程序会在上传前停止，不会创建错误的“下载后删除”假象。
+- OSS 上传地址、字幕下载地址都是短期签名 URL，程序不打印、不保存。
+- 上传、转写、导出、下载、校验任一步失败，都不会删除远端记录，并打印 `transId` 便于手动处理。
+- 本地字幕已成功写入但远端删除失败时，字幕仍会保留，程序返回非零退出码。
+- 默认的永久删除不可恢复，但只针对本次程序刚创建、且已成功下载字幕的 `transId`。
+- 上传使用 OSS 单次 PUT，单文件上限 5 GiB；超过限制会在创建远端任务前停止。
+- `.gitignore` 已忽略 `config.json`、`auth.json`、`sdk/` 等敏感与缓存文件，但不能阻止手动复制或误传，请把整个目录和 ZIP 都按账号凭证管理。
 
 ## 支持格式
 
@@ -180,12 +190,34 @@ python -X utf8 .\tingwu_subtitle.py --config-file "D:\safe\config.json" --auth-f
 
 音频：`mp3`、`wav`、`m4a`、`wma`、`aac`、`ogg`、`amr`、`flac`、`aiff`
 
-## 退出码
+网络要求：必须能访问听悟、阿里云登录和阿里云 OSS 地址；启用官方风控令牌生成时还需访问阿里云 CDN `g.alicdn.com` 与 `ynuf.aliapp.org`。
 
-- `0`：所有文件处理成功；
-- `1`：登录失败、接口失败、文件校验失败、删除复查失败，或批次中至少一个文件失败。
-- `2`：命令行参数错误，或非交互环境中没有提供参数。
+## 退出码与自动化
 
-建议在计划任务中检查 `%ERRORLEVEL%`，只把 `0` 当成完整成功。
+| 退出码 | 含义 |
+|---:|---|
+| `0` | 所有文件完成字幕下载、SRT 校验，以及默认情况下的远端删除复查 |
+| `1` | 登录、接口、上传、转写、导出、下载、校验、删除或批处理中至少一个文件失败 |
+| `2` | 命令行参数错误，或非交互环境中没有提供参数 |
 
-供 AI Agent 或自动化脚本调用时，请直接阅读同目录的 `AI_CLI_GUIDE.md`；其中包含完整语法、参数顺序、退出码、失败语义和 PowerShell 示例。
+自动化时以退出码为最终成功判据，不要仅根据控制台出现"下载""100%"字样判断成功：
+
+```powershell
+.\TingwuSubtitle.exe "D:\视频\课程.mp4"
+if ($LASTEXITCODE -ne 0) {
+    throw "听悟字幕处理失败，退出码：$LASTEXITCODE"
+}
+```
+
+## 从源码重新编译 EXE
+
+```powershell
+# PyInstaller 版
+python -m pip install pyinstaller
+python -m PyInstaller --onefile --console --clean --name TingwuSubtitle --collect-all py_mini_racer tingwu_subtitle.py
+# 产物在 dist\TingwuSubtitle.exe
+
+# Nuitka 版（首次编译会自动下载 C 编译器）
+python -m pip install nuitka
+python -m nuitka --onefile --assume-yes-for-downloads --output-filename=TingwuSubtitleNuitka.exe --include-package=py_mini_racer --include-package-data=py_mini_racer tingwu_subtitle.py
+```
