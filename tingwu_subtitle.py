@@ -26,11 +26,27 @@ try:
     from py_mini_racer import MiniRacer
 except ImportError:
     MiniRacer = None
+else:
+    # py_mini_racer 的 __del__ 在程序退出阶段可能因扩展模块先卸载而
+    # 打印无害的 AttributeError（PyInstaller 冻结后尤为明显）。
+    # 换成防御性析构：能释放就释放，退出阶段静默跳过。
+    def _safe_mini_racer_del(self):
+        try:
+            ext = getattr(self, "ext", None)
+            if ext is not None:
+                ext.mr_free_context(getattr(self, "ctx", None))
+        except Exception:
+            pass
+
+    MiniRacer.__del__ = _safe_mini_racer_del
 
 
 BASE_URL = "https://tingwu.aliyun.com"
 API_URL = BASE_URL + "/api"
-if "__compiled__" in globals():
+if getattr(sys, "frozen", False):
+    # PyInstaller 单文件：以 EXE 所在目录为程序目录
+    PROGRAM_DIR = Path(sys.executable).resolve().parent
+elif "__compiled__" in globals():
     executable_dir = Path(sys.argv[0]).resolve().parent
     PROGRAM_DIR = (
         executable_dir.parent
@@ -301,6 +317,7 @@ def _run_awsc_generation(page_url: str) -> tuple[str, str] | None:
     """执行一次官方 SDK 生成：浏览器环境垫片（BX_ENV_JS，纯 JS）+ 官方 SDK
     （awsc.js/fireyejs.js）在 V8 中执行；SDK 对外的网络请求（umid 令牌接口
     等）由 Python 代理转发回注。"""
+    ctx = None
     try:
         ctx = MiniRacer()
         ctx.eval(BX_ENV_JS)
@@ -368,6 +385,11 @@ def _run_awsc_generation(page_url: str) -> tuple[str, str] | None:
             import traceback
             traceback.print_exc()
         return None
+    finally:
+        # 显式销毁 V8 上下文；避免程序退出阶段 py_mini_racer 的 __del__
+        # 在模块已卸载后运行而打印无害但吓人的异常信息
+        if ctx is not None:
+            del ctx
     return None
 
 

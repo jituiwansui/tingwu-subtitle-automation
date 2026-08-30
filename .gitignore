@@ -12,3 +12,9 @@ sdk/
 # Python runtime artifacts
 __pycache__/
 *.py[cod]
+
+# Build artifacts
+build/
+dist/
+*.spec
+TingwuSubtitle.exe

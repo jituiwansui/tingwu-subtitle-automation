@@ -17,10 +17,10 @@
 ## 运行环境
 
 - Windows 10/11 x64
-- 使用 `TingwuSubtitle.exe` 时不需要安装 Python
+- 使用 `TingwuSubtitle.exe` 时不需要安装 Python 或任何其他软件（风控令牌官方生成所需的 V8 引擎也已打包在内）
 - 使用源码时需要 Python 3.10 或更高版本和 `requests` 2.x
 - 可选：`ffprobe`。安装后程序会把媒体时长一并回传；没有它也能运行。
-- 可选：Python 包 `py-mini-racer`（`pip install py-mini-racer`，已写入 `requirements.txt`）。安装后，当默认的降级值登录被阿里云风控拒绝时，程序会自动运行官方风控 SDK 生成真实令牌重试；不安装也能正常运行。
+- 可选（仅源码运行需要）：Python 包 `py-mini-racer`（`pip install py-mini-racer`，已写入 `requirements.txt`）。安装后，当默认的降级值登录被阿里云风控拒绝时，程序会自动运行官方风控 SDK 生成真实令牌重试；不安装也能正常运行。
 
 只运行 EXE 可跳过此步骤。使用 Python 源码时安装依赖：
 
@@ -31,8 +31,7 @@ python -m pip install -r .\requirements.txt
 程序所需的账号和登录材料全部放在程序根目录：
 
 ```text
-TingwuSubtitle.exe  # Windows x64 原生启动器
-runtime/            # 预展开运行环境，不能删除、移动或改名
+TingwuSubtitle.exe  # Windows x64 单文件程序
 config.json         # 明文账号、密码
 auth.json           # 明文 Cookie 登录状态（登录成功后程序自动写入）
 sdk/                # 官方风控 SDK 缓存（运行时自动下载，可删除）
@@ -40,13 +39,13 @@ sdk/                # 官方风控 SDK 缓存（运行时自动下载，可删�
 
 程序运行时自动读取这两个文件，不依赖当前工作目录，也不需要另传账号参数。按照本项目的部署要求，两者均不加密；复制整个目录即可同时复制登录能力。
 
-根目录 `TingwuSubtitle.exe` 是 64 位原生启动器，负责把拖放和命令行参数原样交给 `runtime/TingwuSubtitleCore.exe`，并原样返回核心程序退出码。核心使用 Python 3.12 和 Nuitka 4.1.3，通过 MinGW64/LTO 编译；Python Runtime、OpenSSL、扩展模块和 CA 证书都已提前展开在 `runtime/`，第一次启动不再解包，目标电脑也无需安装 Python 或 `requests`。请复制或解压整个目录，不能只拿走根目录 EXE。目标系统应为 Windows 10/11 x64。程序未做商业代码签名，其他电脑上的 SmartScreen 或杀毒软件可能要求用户确认允许运行。
+根目录 `TingwuSubtitle.exe` 是 PyInstaller 编译的 64 位单文件程序：Python 运行时、依赖库和内嵌 V8 引擎（py-mini-racer，用于官方风控令牌生成）全部打包在内，目标电脑无需安装任何软件。程序始终把 `config.json`、`auth.json` 和 `sdk/` 缓存放在 EXE 所在目录读写，分发时把整个目录（至少 EXE + `config.json`）一起复制即可；`auth.json` 和 `sdk/` 不存在时会自动登录生成、自动下载。目标系统应为 Windows 10/11 x64。程序未做商业代码签名，其他电脑上的 SmartScreen 或杀毒软件可能要求用户确认允许运行。
 
 > **重要安全提示：** `config.json` 和 `auth.json` 都是明文敏感文件。任何能读取本目录或压缩包的人，都可能取得账号密码或复用登录会话。请仅保存在可信电脑，不要上传网盘、Git 仓库、聊天群或交给无关人员；账号停用、泄露或交付他人后，应立即修改密码并退出所有会话。
 
 ## 最快用法：拖放运行
 
-本工具不再包含 BAT 入口。直接使用根目录 `TingwuSubtitle.exe`；不要直接移动或重命名 `runtime/` 中的文件。也可运行源码 `tingwu_subtitle.py`。
+本工具不再包含 BAT 入口。直接使用根目录 `TingwuSubtitle.exe`。也可运行源码 `tingwu_subtitle.py`。
 
 方式一：把一个或多个音视频文件直接拖到 `TingwuSubtitle.exe` 图标上；使用源码时也可以拖到 `tingwu_subtitle.py` 图标上。程序随即开始上传和处理。
 

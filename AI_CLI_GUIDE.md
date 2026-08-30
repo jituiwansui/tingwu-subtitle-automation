@@ -4,26 +4,22 @@
 
 ## 1. 工作目录与配套文件
 
-交付目录必须整体保留，关键结构如下：
+交付目录的关键结构如下：
 
 ```text
 TingwuSubtitle.exe
 config.json
 auth.json
-runtime/
-  TingwuSubtitleCore.exe
-  python312.dll
-  ...其他 DLL、PYD 和证书文件
+sdk/
 ```
 
+- `TingwuSubtitle.exe`：PyInstaller 单文件程序，Python 运行时、依赖库和内嵌 V8 引擎全部打包在内，无需安装任何软件。
 - `config.json`：明文阿里云账号和密码。
-- `auth.json`：明文 Cookie 和阿里云登录风控材料。
-- `runtime/`：预展开运行环境。AI 不得删除、移动、重命名或只复制其中部分文件。
-- 根目录 EXE 是参数转发启动器；它会等待核心进程结束，并原样返回核心退出码。
-- EXE 会始终读取自身所在目录中的这两个文件，不依赖调用方当前工作目录。
-- 这两个 JSON 都是敏感凭证。AI 不应读取、回显、记录或上传其内容。
-- 使用 EXE 时不需要安装 Python，也不需要安装 `requests`。
-- 第一次启动不会再把运行环境解压到用户缓存；ZIP 解压完成后即可直接运行。
+- `auth.json`：明文 Cookie 登录状态（登录成功后程序自动写入）。
+- `sdk/`：官方风控 SDK 缓存，首次需要时自动下载；删除不影响功能。
+- EXE 始终读写自身所在目录中的 `config.json` / `auth.json` / `sdk/`，不依赖调用方当前工作目录。
+- `config.json` 和 `auth.json` 都是敏感凭证。AI 不应读取、回显、记录或上传其内容。
+- 分发时复制整个目录（至少 EXE + `config.json`）即可运行。
 
 ## 2. 首选调用语法
 
