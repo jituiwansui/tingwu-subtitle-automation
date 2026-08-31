@@ -16,11 +16,28 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import urlencode, urlparse
 
 import requests
+
+
+def configure_standard_streams() -> None:
+    """冻结版在 Windows 管道/旧控制台中也统一输出可读的 UTF-8 中文。"""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+configure_standard_streams()
 
 try:
     from py_mini_racer import MiniRacer
@@ -62,7 +79,7 @@ BX_SDK_DIR = PROGRAM_DIR / "sdk"
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".wmv", ".m4v", ".flv", ".rmvb", ".dat", ".mov", ".mkv",
-    ".webm", ".avi", ".mpeg", ".3gp", ".ogg",
+    ".webm", ".avi", ".mpeg", ".3gp", ".ogg", ".ts",
 }
 AUDIO_EXTENSIONS = {
     ".mp3", ".wav", ".m4a", ".wma", ".aac", ".ogg", ".amr", ".flac", ".aiff",
@@ -642,13 +659,20 @@ class TingwuClient:
             )
         return payload
 
-    def generate_upload(self, media: Path, lang: str, role_split_num: str) -> dict[str, Any]:
+    def generate_upload(
+        self,
+        media: Path,
+        lang: str,
+        role_split_num: str,
+        *,
+        title: str | None = None,
+    ) -> dict[str, Any]:
         extension = media.suffix.lower()
         mime_type = mimetypes.guess_type(media.name)[0] or "application/octet-stream"
         if extension == ".mp4":
             mime_type = "video/mp4"
         task_id = f"codex-upload-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
-        title = media.stem[:150]
+        title = (title or media.stem)[:150]
         body = {
             "action": "generatePutLink",
             "version": "1.0",
@@ -910,27 +934,245 @@ class TingwuClient:
         return all(item.get("transId") != trans_id for item in payload.get("data") or [])
 
 
-def probe_duration(media: Path) -> int | None:
-    executable = shutil.which("ffprobe")
+def find_media_tool(name: str) -> str | None:
+    """优先查找程序根目录中的便携工具，再回退到系统 PATH。"""
+    bundled_names = [f"{name}.exe", name] if os.name == "nt" else [name, f"{name}.exe"]
+    for bundled_name in bundled_names:
+        candidate = PROGRAM_DIR / bundled_name
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which(name)
+
+
+def probe_duration_seconds(media: Path) -> float | None:
+    executable = find_media_tool("ffprobe")
+    if executable:
+        try:
+            result = subprocess.run(
+                [
+                    executable,
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(media),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=30,
+            )
+            duration = float(result.stdout.strip())
+            return duration if duration > 0 else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+    # 分发目录只需要携带一个独立 ffmpeg.exe。没有 ffprobe 时，读取
+    # ffmpeg 的媒体头信息即可取得时长，不会完整扫描或转码文件。
+    executable = find_media_tool("ffmpeg")
     if not executable:
         return None
     try:
         result = subprocess.run(
             [
                 executable,
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-hide_banner",
+                "-i",
                 str(media),
             ],
-            check=True,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=30,
         )
-        return max(1, int(float(result.stdout.strip())))
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
+        if not match:
+            return None
+        hours, minutes, seconds = match.groups()
+        duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        return duration if duration > 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def probe_duration(media: Path) -> int | None:
+    duration = probe_duration_seconds(media)
+    return max(1, int(duration)) if duration is not None else None
+
+
+def _temporary_mp4_path(media: Path) -> Path:
+    safe_stem = re.sub(r'[^0-9A-Za-z._-]+', "_", media.stem).strip(" ._") or "media"
+    return media.with_name(f".{safe_stem[:60]}.tingwu-{uuid.uuid4().hex[:10]}.mp4")
+
+
+def validate_mp4_against_source(source: Path, destination: Path) -> None:
+    if not destination.is_file() or destination.stat().st_size <= 0:
+        raise TingwuError("TS 转 MP4 失败：未生成有效的 MP4 文件")
+    source_duration = probe_duration_seconds(source)
+    converted_duration = probe_duration_seconds(destination)
+    if source_duration is None or converted_duration is None:
+        raise TingwuError("无法读取 TS 或 MP4 时长，不能确认转换文件是否完整")
+    allowed_delta = max(3.0, source_duration * 0.01)
+    if abs(converted_duration - source_duration) > allowed_delta:
+        raise TingwuError(
+            "TS 与 MP4 时长校验不一致："
+            f"源文件 {source_duration:.1f} 秒，MP4 {converted_duration:.1f} 秒"
+        )
+
+
+def convert_ts_to_mp4(
+    source: Path, destination: Path, progress: PipelineProgress
+) -> Path:
+    """将 MPEG-TS 无损换封装为 MP4；不重新编码音视频。"""
+    executable = find_media_tool("ffmpeg")
+    if not executable:
+        raise TingwuError(
+            f"TS 转 MP4 需要 ffmpeg；请确认程序根目录存在 ffmpeg.exe：{PROGRAM_DIR}"
+        )
+    source_size = source.stat().st_size
+    required_space = source_size + 128 * 1024**2
+    try:
+        free_space = shutil.disk_usage(source.parent).free
+    except OSError:
+        free_space = required_space
+    if free_space < required_space:
+        raise TingwuError(
+            "TS 转 MP4 的临时空间不足："
+            f"至少需要约 {format_bytes(required_space)}，当前可用 {format_bytes(free_space)}"
+        )
+
+    duration = probe_duration_seconds(source)
+    started = time.monotonic()
+    progress.update(0, "正在极速转换 TS → MP4（不重新编码）")
+    command = [
+        executable,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+        "-y",
+        "-fflags", "+genpts",
+        "-i", str(source),
+        "-map", "0:v:0?",
+        "-map", "0:a:0?",
+        "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
+        "-progress", "pipe:1",
+        "-nostats",
+        str(destination),
+    ]
+    recent_output: deque[str] = deque(maxlen=20)
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if process.stdout is None:
+            raise OSError("无法读取 ffmpeg 输出")
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            key, separator, value = line.partition("=")
+            if separator and key == "out_time_us" and duration:
+                try:
+                    converted_seconds = int(value) / 1_000_000
+                    percent = min(99.0, converted_seconds * 100 / duration)
+                    progress.segment(
+                        percent,
+                        0,
+                        7,
+                        f"正在极速转换 TS → MP4 · {percent:.0f}%",
+                    )
+                except ValueError:
+                    pass
+            elif key not in {
+                "bitrate", "drop_frames", "dup_frames", "fps", "frame",
+                "out_time", "out_time_ms", "out_time_us", "progress", "speed",
+                "stream_0_0_q", "total_size",
+            }:
+                recent_output.append(line)
+        return_code = process.wait()
+        if return_code != 0:
+            details = "；".join(recent_output) or f"退出码 {return_code}"
+            raise TingwuError(f"TS 转 MP4 失败：{details}")
+    except BaseException:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
+
+    validate_mp4_against_source(source, destination)
+    elapsed = max(time.monotonic() - started, 0.001)
+    progress.update(
+        7,
+        "TS 已极速转换成 MP4 · "
+        f"{format_bytes(destination.stat().st_size)} · {elapsed:.1f} 秒",
+    )
+    return destination
+
+
+def prepare_upload_media(media: Path, progress: PipelineProgress) -> Path:
+    if media.suffix.lower() != ".ts":
+        return media
+    destination = media.with_suffix(".mp4")
+    if destination.exists():
+        if destination.stat().st_mtime_ns < media.stat().st_mtime_ns:
+            raise TingwuError(
+                f"同名 MP4 比 TS 更旧，为避免上传错误文件，程序不会覆盖或复用：{destination}"
+            )
+        validate_mp4_against_source(media, destination)
+        progress.update(
+            7,
+            f"复用已校验的同名 MP4 · {format_bytes(destination.stat().st_size)}",
+        )
+        return destination
+
+    temporary = _temporary_mp4_path(media)
+    try:
+        convert_ts_to_mp4(media, temporary, progress)
+        if destination.exists():
+            raise TingwuError(f"转换期间出现同名 MP4，为避免覆盖已停止：{destination}")
+        temporary.rename(destination)
+        progress.update(7, f"MP4 已保留在 TS 同目录：{destination.name}")
+        return destination
+    finally:
+        if temporary.exists():
+            for attempt in range(3):
+                try:
+                    temporary.unlink()
+                    break
+                except OSError as exc:
+                    if attempt == 2:
+                        print(f"警告：转换临时文件清理失败，请手动删除：{temporary} ({exc})", file=sys.stderr)
+                    else:
+                        time.sleep(0.3)
+
+
+def delete_original_ts_after_valid_srt(
+    media: Path, destination: Path, progress: PipelineProgress
+) -> bool:
+    if media.suffix.lower() != ".ts":
+        return False
+    progress.update(99.5, "再次校验最终 SRT，准备删除原始 TS")
+    validate_srt(destination)
+    if destination.stat().st_size <= 0:
+        raise ApiError("最终 SRT 是空文件，已保留原始 TS")
+    for attempt in range(3):
+        try:
+            media.unlink()
+            progress.update(99.8, "最终 SRT 校验通过 · 原始 TS 已删除")
+            return True
+        except OSError as exc:
+            if attempt == 2:
+                raise TingwuError(f"SRT 已验证有效，但无法删除原始 TS：{media} ({exc})") from exc
+            time.sleep(0.3)
+    return False
 
 
 def validate_srt(path: Path) -> None:
@@ -946,6 +1188,18 @@ def validate_srt(path: Path) -> None:
     )
     if not re.search(r"(?m)^\d+\s*$", text) or not timestamp.search(text):
         raise ApiError("下载文件未通过 SRT 结构校验")
+    has_subtitle_text = False
+    for block in re.split(r"\r?\n\s*\r?\n", text.strip()):
+        lines = block.splitlines()
+        if len(lines) < 3 or not lines[0].strip().isdigit():
+            continue
+        if timestamp.fullmatch(lines[1].strip()) is None:
+            continue
+        if any(line.strip() for line in lines[2:]):
+            has_subtitle_text = True
+            break
+    if not has_subtitle_text:
+        raise ApiError("SRT 没有实际字幕文本，已保留原始 TS")
 
 
 def safe_output_name(media: Path) -> str:
@@ -978,13 +1232,20 @@ def process_one(
     print(f"  字幕：{destination}")
     progress.update(0, "检查输入文件")
     trans_id: str | None = None
+    upload_media = media
     try:
-        upload = client.generate_upload(media, args.lang, args.role_split_num)
+        upload_media = prepare_upload_media(media, progress)
+        upload = client.generate_upload(
+            upload_media,
+            args.lang,
+            args.role_split_num,
+            title=media.stem,
+        )
         trans_id = upload["transId"]
         progress.update(8, "远端任务已创建")
-        client.upload_file(media, upload, progress)
+        client.upload_file(upload_media, upload, progress)
         progress.update(32, "正在提交上传结果")
-        client.sync_upload(media, upload)
+        client.sync_upload(upload_media, upload)
         progress.update(35, "等待转写")
         item = client.wait_for_transcript(
             trans_id,
@@ -1002,16 +1263,35 @@ def process_one(
             export_task_id, trans_id, args.export_timeout, progress
         )
         client.download_srt(download_url, destination, progress)
+        progress.update(96, "再次校验最终 SRT 内容")
+        validate_srt(destination)
+        if destination.stat().st_size <= 0:
+            raise ApiError("最终 SRT 是空文件，已保留原始 TS")
     except Exception:
-        progress.update(progress.percent, "处理失败，远端任务已保留", finished=True)
+        failure_detail = "处理失败，远端任务已保留" if trans_id else "处理失败，远端任务尚未创建"
+        progress.update(progress.percent, failure_detail, finished=True)
+        if media.suffix.lower() == ".ts" and upload_media.suffix.lower() == ".mp4" and upload_media.exists():
+            print(f"  MP4 已保留：{upload_media}", file=sys.stderr)
         if trans_id:
             print(f"  处理失败，未删除远端任务：{trans_id}", file=sys.stderr)
         else:
             print("  处理失败，远端任务尚未创建", file=sys.stderr)
         raise
     if args.keep_remote:
+        try:
+            ts_deleted = delete_original_ts_after_valid_srt(media, destination, progress)
+        except Exception:
+            progress.update(progress.percent, "字幕和 MP4 已保留，但原始 TS 删除失败", finished=True)
+            print(f"  SRT 已保留：{destination}", file=sys.stderr)
+            if upload_media != media:
+                print(f"  MP4 已保留：{upload_media}", file=sys.stderr)
+            raise
         progress.update(100, "处理完成 · 已按要求保留远端任务", finished=True)
         print(f"  SRT：{destination} ({destination.stat().st_size} bytes)")
+        if upload_media != media:
+            print(f"  MP4：{upload_media} ({upload_media.stat().st_size} bytes)")
+        if ts_deleted:
+            print(f"  原始 TS 已在最终字幕校验通过后删除：{media}")
         print(f"  已按 --keep-remote 保留远端任务：{trans_id}")
         client.save()
         return destination
@@ -1025,8 +1305,20 @@ def process_one(
         progress.update(progress.percent, "字幕已保存，但远端删除失败", finished=True)
         print(f"  SRT 已保留：{destination}", file=sys.stderr)
         raise
+    try:
+        ts_deleted = delete_original_ts_after_valid_srt(media, destination, progress)
+    except Exception:
+        progress.update(progress.percent, "远端记录已删除，但原始 TS 删除失败", finished=True)
+        print(f"  SRT 已保留：{destination}", file=sys.stderr)
+        if upload_media != media:
+            print(f"  MP4 已保留：{upload_media}", file=sys.stderr)
+        raise
     progress.update(100, "处理完成 · 远端记录已删除", finished=True)
     print(f"  SRT：{destination} ({destination.stat().st_size} bytes)")
+    if upload_media != media:
+        print(f"  MP4：{upload_media} ({upload_media.stat().st_size} bytes)")
+    if ts_deleted:
+        print(f"  原始 TS 已在最终字幕校验通过后删除：{media}")
     print(f"  远端记录已永久删除并复查确认：{trans_id}")
     client.save()
     return destination
@@ -1042,7 +1334,7 @@ def password_from_args(args: argparse.Namespace, config: dict[str, Any]) -> str 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="通义听悟：上传音视频，自动下载 SRT，成功后永久删除远端记录"
+        description="通义听悟：上传音视频（TS 自动极速转 MP4），自动下载 SRT，成功后永久删除远端记录"
     )
     parser.add_argument(
         "--config-file", type=Path, default=DEFAULT_CONFIG_FILE,
@@ -1054,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    process = subparsers.add_parser("process", help="处理一个或多个音视频")
+    process = subparsers.add_parser("process", help="处理一个或多个音视频（TS 自动极速转 MP4）")
     process.add_argument("files", nargs="+", type=Path)
     process.add_argument(
         "-o", "--output-dir", type=Path,
@@ -1156,7 +1448,7 @@ def parse_dropped_paths(raw: str) -> list[str]:
 
 def collect_files_interactively() -> list[str]:
     print("通义听悟字幕自动化工具")
-    print("请把一个或多个音视频文件拖入此窗口，然后按 Enter 开始。")
+    print("请把一个或多个音视频文件拖入此窗口，然后按 Enter 开始（TS 会自动极速转 MP4）。")
     print("多个文件可一次全部拖入；字幕默认保存到各自视频所在目录。")
     while True:
         try:
